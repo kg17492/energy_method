@@ -26,7 +26,7 @@ class Data(list[dict[str, str]]):
         ).T
 
 
-class Energy_Method(ss7.SS7_Reader):
+class Energy_Method(ss7.SS7_Output):
     load: str
     soil: Soil
     story_shear: np.ndarray
@@ -46,7 +46,7 @@ class Energy_Method(ss7.SS7_Reader):
     mode_initial_stiffness: str = "接線"
     dmax: float = 1 / 100
 
-    def __init__(self, ss7_filename: str, load: str, include_spectrum: str = None) -> None:
+    def __init__(self, ss7_filename: str, load: str, include_spectrum: str | float | None = None) -> None:
         """
         Args:
             - ss7_filename SS7の出力ファイル
@@ -137,7 +137,7 @@ class Energy_Method(ss7.SS7_Reader):
             self.get("構造階高")[:-1]
         )]
 
-    def brace_is_damper(self, story: str = None) -> np.ndarray:
+    def brace_is_damper(self, story: str | None = None) -> np.ndarray:
         if story is None:
             return np.array([
                 self.brace_is_damper(s) for s in self.stories()
@@ -155,16 +155,19 @@ class Energy_Method(ss7.SS7_Reader):
         return len(self.get("地震力 X加力"))
 
     def design_shear(self) -> np.ndarray:
+        """設計せん断力 Story"""
         return np.array([d["一次設計用Qi1kN"] if "一次設計用Qi1kN" in d else d["1次設計用Qi1kN"] for d in self.get(f"地震力 {self.direction()}加力")], dtype=np.float64)
 
     def ci_factor(self) -> np.ndarray:
+        """設計ベースシア係数 Story"""
         return np.array([d["一次設計用Ci1"] if "一次設計用Ci1" in d else d["1次設計用Ci1"] for d in self.get(f"地震力 {self.direction()}加力")], dtype=np.float64)
 
     def ai_factor(self) -> np.ndarray:
+        """設計Ai分布 Story"""
         return np.array([d["Ai"] for d in self.get(f"地震力 {self.direction()}加力")], dtype=np.float64)
 
     def eccentricity(self) -> np.ndarray:
-        # return 0.1
+        """偏心率 Re Story"""
         eccentricity: np.ndarray = np.max(np.array([
             [d["偏心率Re"] for d in self.get(f"偏心率(雑壁なし) {load}")] for load in [
                 "EX+EY+",
@@ -190,7 +193,8 @@ class Energy_Method(ss7.SS7_Reader):
             3 if self.direction() == "X" else 4,
         )[:-1]
 
-    def rt(self, td: np.ndarray = None) -> np.ndarray:
+    def rt(self, td: np.ndarray | None = None) -> np.ndarray:
+        """振動特性係数 Step"""
         if td is None:
             td = self.period()
         table: tool.Table = tool.Table(self.get("地震力基本データ")[0])
@@ -202,6 +206,7 @@ class Energy_Method(ss7.SS7_Reader):
         ], axis=0)
 
     def gs(self, td: np.ndarray) -> np.ndarray:
+        """地盤の増幅特性係数 Step"""
         if self.t_sample is None:
             return self.soil.gs(td)
         else:
@@ -217,6 +222,7 @@ class Energy_Method(ss7.SS7_Reader):
         return table.get_right_float("地域係数 Z", 3)
 
     def period(self, step: str = None) -> np.ndarray:
+        """固有周期 Td Step"""
         m: np.ndarray = self.story("地震用質量")
         period: np.ndarray = np.array([Eigen_Analysis(np.flip(m), np.flip(k) * 1000).period() for k in self.story("割線剛性")])
         if step is None:
@@ -225,12 +231,12 @@ class Energy_Method(ss7.SS7_Reader):
             return period[self.step(step)]
 
     def velocity(self, key: str) -> np.ndarray:
-        """エネルギー換算速度
+        """エネルギー換算速度 Step
 
         Args:
             - key:
-                - 稀地震
-                - 極稀地震
+                - 稀地震 Vd
+                - 極稀地震 Vs
         """
         if key == "稀地震":
             return self.soil.vd(self.period())
@@ -246,7 +252,7 @@ class Energy_Method(ss7.SS7_Reader):
             )
 
     def inputted_energy(self, key: str) -> np.ndarray:
-        """地震動によって入力されるエネルギー
+        """地震動によって入力されるエネルギー Scalar
 
         Args:
             - key:
@@ -258,7 +264,8 @@ class Energy_Method(ss7.SS7_Reader):
         return m * v ** 2 / 2 * 1000                # kN m
 
     def necessary_energy_capacity(self) -> np.ndarray:
-        return self.inputted_energy("極稀地震") - self.building("安全限界時吸収エネルギー")
+        """安全限界必要エネルギー Es Step"""
+        return self.inputted_energy("極稀地震") - self.building("安全限界吸収エネルギー")
 
     def converge_delta_ultimate(self, n: int = 10) -> None:
         """想定最大応答変位と最大応答変位を収束計算する"""
@@ -282,7 +289,7 @@ class Energy_Method(ss7.SS7_Reader):
         print(f"最大応答変位を{n}回計算しましたが収束しませんでした。")
 
     def check_ai_factor(self, filename: str = None) -> None:
-        """初期剛性でのAi分布と損傷限界時のAi分布を比較する"""
+        """初期剛性でのAi分布と損傷限界のAi分布を比較する"""
         plt.figure(figsize=(3, 3))
         plt.plot(self.ai_factor(), self.story("Ai分布")[self.step("損傷限界")], "-o")
         xmax: float = max([plt.xlim()[1], plt.ylim()[1]])
@@ -299,17 +306,18 @@ class Energy_Method(ss7.SS7_Reader):
         """各ステップでの建物全体の応答を返す
 
         Args:
-            - key:
-                - 損傷限界時吸収エネルギー
-                - 安全限界時吸収エネルギー
-                - 平均層間変形角
-                - 最大層間変形角
-                - ベースシア係数
+            |symbol|key|size|
+            |:--:|:--|:--|
+            ||損傷限界吸収エネルギー|Step|
+            |We|安全限界吸収エネルギー|Step by 主架構降伏|
+            ||平均層間変形角|Step|
+            ||最大層間変形角|Step|
+            |C1|ベースシア係数|Step|
         """
-        if key == "損傷限界時吸収エネルギー":
-            return np.sum(self.story("損傷限界時吸収エネルギー"), axis=1)
-        elif key == "安全限界時吸収エネルギー":
-            return np.sum(self.story("安全限界時吸収エネルギー"), axis=1)
+        if key == "損傷限界吸収エネルギー":
+            return np.sum(self.story("損傷限界吸収エネルギー"), axis=1)
+        elif key == "安全限界吸収エネルギー":
+            return np.sum(self.story("安全限界吸収エネルギー"), axis=1)
         return {
             "平均層間変形角": np.sum(self.story("層間変位"), axis=1) / np.sum(self.story("構造階高")),
             "最大層間変形角": np.max(self.story("層間変形角"), axis=1),
@@ -320,21 +328,22 @@ class Energy_Method(ss7.SS7_Reader):
         """各ステップでの層の応答・応力を返す
 
         Args:
-            - key:
-                - 必要吸収エネルギー
-                - 保有水平耐力
-                - 最大応答変位
-                - 最大応答変形角
-                - 損傷限界時吸収エネルギー
-                - 安全限界時吸収エネルギー
-                - Ai分布
-                - 層間変形角
-                - せん断力
-                - 層間変位
-                - 割線剛性
-                - 構造階高
-                - 意匠階高
-                - 地震用質量
+            |symbol|key|size|
+            |:--:|:--|:--|
+            |Esi|必要吸収エネルギー|Step by 主架構降伏*Story|
+            |Qui|保有水平耐力|Story|
+            ||最大応答変位|Step by 主架構降伏*Story|
+            ||最大応答変形角|Step by 主架構降伏*Story|
+            ||損傷限界吸収エネルギー|Step*Story|
+            ||安全限界吸収エネルギー|Step by 主架構降伏*Story|
+            |Ai|Ai分布|Step*Story|
+            ||層間変形角|Step*Story|
+            ||せん断力|Step*Story|
+            |δi|層間変位|Step*Story|
+            ||割線剛性|Step*Story|
+            ||構造階高|Story|
+            ||意匠階高|Story|
+            |mi|地震用質量|Story|
         """
         if key == "必要吸収エネルギー":
             mi: np.ndarray = self.story("地震用質量")
@@ -371,12 +380,12 @@ class Energy_Method(ss7.SS7_Reader):
         elif key == "最大応答変形角":
             return self.story("最大応答変位") / self.story("構造階高")
         elif key in [
-            "損傷限界時吸収エネルギー",
-            "安全限界時吸収エネルギー",
+            "損傷限界吸収エネルギー",
+            "安全限界吸収エネルギー",
         ]:
-            n: float = 2 if key == "損傷限界時吸収エネルギー" else 5
+            n: float = 2 if key == "損傷限界吸収エネルギー" else 5
             return np.sum([
-                self.frame(f"{key[0:4]}時弾性エネルギー"),
+                self.frame(f"{key[0:4]}弾性エネルギー"),
                 self.damper("弾性エネルギー"),
                 self.damper("塑性エネルギー") * 2 * n,
             ], axis=0)
@@ -398,6 +407,12 @@ class Energy_Method(ss7.SS7_Reader):
         }[key]
 
     def story_height(self, key: str) -> np.ndarray:
+        """階高 Story
+        Args:
+            key :
+                - 構造階高mm
+                - 階高mm
+        """
         story_height: np.ndarray = np.zeros(self.number_of_stories())
         i: int = 0
         for row in self.get("構造階高")[:-1]:
@@ -441,24 +456,25 @@ class Energy_Method(ss7.SS7_Reader):
         """各ステップでの主架構の応答・応力を返す
 
         Args:
-            - key:
-                - 降伏済み
-                - 初期剛性
-                - 降伏耐力
-                - 降伏変位
-                - 保有水平耐力
-                - 損傷限界時弾性エネルギー
-                - 安全限界時弾性エネルギー
-                - 累積吸収エネルギー
-                - 必要吸収エネルギー
-                - 必要累積塑性変形倍率
-                - 想定最大応答変位
-                - 崩壊モード
-                - 部材種別
-                - 保有累積塑性変形倍率
-                - 層間変位
-                - 層間変形角
-                - せん断力
+            |symbol|key|size|
+            |:--:|:--|:--|
+            ||降伏済み|Step*Story|
+            |kfi|初期剛性|Story|
+            |Qfi|降伏耐力|Story|
+            |δfui|降伏変位|Story|
+            |Qfi|保有水平耐力|Story|
+            |Wfi|損傷限界弾性エネルギー|Step*Story|
+            ||安全限界弾性エネルギー|Step by 主架構降伏*Story|
+            ||累積吸収エネルギー|Step*Story|
+            |Esfi|必要吸収エネルギー|Step by 主架構降伏*Story|
+            |ηsfi|必要累積塑性変形倍率|Step by 主架構降伏*Story|
+            ||想定最大応答変位|Story|
+            ||崩壊モード|Story|
+            ||部材種別|Story|
+            ||保有累積塑性変形倍率|Story|
+            ||層間変位|Step*Story|
+            ||層間変形角|Step*Story|
+            ||せん断力|Step*Story|
         """
         if key == "降伏済み":
             return self.story("層間変位") > self.frame("降伏変位")
@@ -493,9 +509,9 @@ class Energy_Method(ss7.SS7_Reader):
                 self.frame("降伏耐力") if self.frame_bilinear else
                 self.frame("せん断力")[self.step("保有水平耐力")]
             )
-        elif key == "損傷限界時弾性エネルギー":
+        elif key == "損傷限界弾性エネルギー":
             return self.frame("層間変位") ** 2 * self.frame("初期剛性") / 2
-        elif key == "安全限界時弾性エネルギー":
+        elif key == "安全限界弾性エネルギー":
             return np.sum([
                 self.frame("降伏耐力") ** 2 / self.frame("初期剛性") * self.frame("降伏済み"),
                 self.frame("層間変位") ** 2 * self.frame("初期剛性") * ~self.frame("降伏済み"),
@@ -519,14 +535,14 @@ class Energy_Method(ss7.SS7_Reader):
         elif key == "想定最大応答変位":
             return self.frame("層間変位")[*self.step(key)]
         elif key == "崩壊モード":
-            return [
+            return np.array([
                 "柱" if any([
                     self.all_floor_mechanism_is(self.floors()[i], "柱"),
                     self.all_floor_mechanism_is(self.floors()[i + 1], "柱"),
                 ]) else "梁" for i in range(self.number_of_stories())
-            ]
+            ])
         elif key == "部材種別":
-            return [f'F{x["種別"].strip()}' for x in self.get(f"柱・梁群の種別 {self.load_in_japanese()}")]
+            return np.array([f'F{x["種別"].strip()}' for x in self.get(f"柱・梁群の種別 {self.load_in_japanese()}")])
         elif key == "保有累積塑性変形倍率":
             eta_cri: dict[str, dict[str, float]] = {
                 "柱": {
@@ -558,22 +574,23 @@ class Energy_Method(ss7.SS7_Reader):
         """各ステップでのダンパーの応答・応力を返す
 
         Args:
-            - key:
-                - 降伏済み
-                - 初期剛性
-                - 降伏耐力
-                - 降伏変位
-                - 保有水平耐力
-                - 弾性エネルギー
-                - 塑性エネルギー
-                - 残留変位
-                - 残留変形角
-                - 必要吸収エネルギー
-                - 必要累積塑性変形倍率
-                - 保有累積塑性変形倍率
-                - 層間変位
-                - 層間変形角
-                - せん断力
+            |symbol|key|size|
+            |:--:|:--|:--|
+            ||降伏済み|Story|
+            |kdi|初期剛性|Story|
+            |Qdi|降伏耐力|Story|
+            |δdui|降伏変位|Story|
+            |Qdui|保有水平耐力|Story|
+            |Wdei|弾性エネルギー|Step*Story|
+            ||塑性エネルギー|Step*Story|
+            |δresi|残留変位|Step*Story|
+            ||残留変形角|Step*Story|
+            |Esdi|必要吸収エネルギー|Step by 主架構降伏*Story|
+            |ηsdi|必要累積塑性変形倍率|Step by 主架構降伏*Story|
+            ||保有累積塑性変形倍率|Step*Story|
+            ||層間変位|Step*Story|
+            ||層間変形角|Step*Story|
+            ||せん断力|Step*Story|
         """
         if key == "降伏済み":
             return self.story("層間変位") > self.damper("降伏変位")
@@ -620,8 +637,8 @@ class Energy_Method(ss7.SS7_Reader):
             ndi: float = 10
             dy: np.ndarray = self.damper("降伏変位")
 
-            def di(key: str) -> np.ndarray:
-                return self.story("層間変位")[self.step(key)]
+            def di(key_step: str) -> np.ndarray:
+                return self.story("層間変位")[self.step(key_step)]
 
             esi_qdui_qui: np.ndarray = self.story("必要吸収エネルギー") * self.damper("保有水平耐力") / self.story("保有水平耐力")
             esdpi: np.ndarray = 2 * nsi * (di("主架構降伏") - dy) * self.damper("保有水平耐力") * (di("主架構降伏") > dy)
@@ -719,9 +736,9 @@ class Energy_Method(ss7.SS7_Reader):
                 a_max=np.argmax(self.period() > ts_td * self.period("損傷限界")),
             )
         elif key == "稀地震":
-            return np.argmax(self.building("損傷限界時吸収エネルギー") > self.inputted_energy("稀地震")[self.step("損傷限界")])
+            return np.argmax(self.building("損傷限界吸収エネルギー") > self.inputted_energy("稀地震")[self.step("損傷限界")])
         elif key == "極稀地震":
-            return np.argmax(self.building("安全限界時吸収エネルギー") > self.inputted_energy("極稀地震"))
+            return np.argmax(self.building("安全限界吸収エネルギー") > self.inputted_energy("極稀地震"))
         elif key == "主架構降伏":
             return (
                 np.argmax(np.any(self.frame("降伏済み"), axis=1)) - 1 if self.frame_bilinear else
@@ -785,11 +802,11 @@ class Energy_Method(ss7.SS7_Reader):
             - key:
                 - 損傷限界
                 - 固有周期
-                - 損傷限界時吸収エネルギー
+                - 損傷限界吸収エネルギー
                 - 残留層間変形角
                 - 安全限界
                 - 想定最大応答変形角
-                - 安全限界時吸収エネルギー
+                - 安全限界吸収エネルギー
                 - 最大応答変形角
                 - 主架構必要累積塑性変形倍率
                 - ダンパー必要累積塑性変形倍率
@@ -855,12 +872,12 @@ class Energy_Method(ss7.SS7_Reader):
             self.plot_xlim_and_ylim(xmax, 1.4)
             plt.xlabel("最大層間変形角")
             plt.ylabel("固有周期")
-        elif key == "損傷限界時吸収エネルギー":
-            plt.plot(self.building("ベースシア係数"), np.sum(self.frame("損傷限界時弾性エネルギー"), axis=1), "--", label="主架構")
+        elif key == "損傷限界吸収エネルギー":
+            plt.plot(self.building("ベースシア係数"), np.sum(self.frame("損傷限界弾性エネルギー"), axis=1), "--", label="主架構")
             plt.plot(self.building("ベースシア係数"), np.sum(self.damper("弾性エネルギー"), axis=1), "--", label="ダンパー弾性")
             plt.plot(self.building("ベースシア係数"), np.sum(self.damper("塑性エネルギー"), axis=1) * 2 * 2, "--", label="ダンパー塑性")
             plt.plot(self.building("ベースシア係数"), self.inputted_energy("稀地震"), label="必要吸収")
-            plt.plot(self.building("ベースシア係数"), self.building("損傷限界時吸収エネルギー"), "-o", label="総和")
+            plt.plot(self.building("ベースシア係数"), self.building("損傷限界吸収エネルギー"), "-o", label="総和")
             plt.legend()
             plt.vlines(x=[
                 self.building("ベースシア係数")[self.step("損傷限界")],
@@ -884,13 +901,13 @@ class Energy_Method(ss7.SS7_Reader):
             ]))
             plt.xlabel("ベースシア係数C0")
             plt.ylabel("損傷限界吸収エネルギー")
-        elif key == "安全限界時吸収エネルギー":
+        elif key == "安全限界吸収エネルギー":
             xmax: float = 1 / 50
-            plt.plot(self.building("最大層間変形角"), np.sum(self.frame("安全限界時弾性エネルギー"), axis=1), "--")
+            plt.plot(self.building("最大層間変形角"), np.sum(self.frame("安全限界弾性エネルギー"), axis=1), "--")
             plt.plot(self.building("最大層間変形角"), np.sum(self.damper("弾性エネルギー"), axis=1), "--")
             plt.plot(self.building("最大層間変形角"), np.sum(self.damper("塑性エネルギー"), axis=1) * 2 * 5, "--")
             plt.hlines(y=self.inputted_energy("極稀地震"), xmin=0, xmax=xmax, label="極稀地震")
-            plt.plot(self.building("最大層間変形角"), self.building("安全限界時吸収エネルギー"), label="安全限界")
+            plt.plot(self.building("最大層間変形角"), self.building("安全限界吸収エネルギー"), label="安全限界")
             self.plot_xlim_and_ylim(
                 xmax,
                 int(
@@ -958,7 +975,7 @@ class Energy_Method(ss7.SS7_Reader):
             fy: np.ndarray = np.array([self.damper("降伏耐力")])
             amp: np.ndarray = np.array([np.linspace(0, 3, 100)]).T
             q: np.ndarray = fy * amp
-            we: np.ndarray = np.array([self.story("損傷限界時吸収エネルギー")[self.step("稀地震")]])
+            we: np.ndarray = np.array([self.story("損傷限界吸収エネルギー")[self.step("稀地震")]])
             ed: np.ndarray = max(self.inputted_energy("稀地震")) * we / np.sum(we)
             kf_delta: np.ndarray = np.sqrt(
                 16 * q**2 + 7 * kf * dy * q + 2 * kf * ed
@@ -989,7 +1006,7 @@ class Energy_Method(ss7.SS7_Reader):
             fy: np.ndarray = np.array([self.damper("降伏耐力")])
             amp: np.ndarray = np.array([np.linspace(0, 3, 100)]).T
             q: np.ndarray = fy * amp
-            we: np.ndarray = np.array([self.story("損傷限界時吸収エネルギー")[self.step("稀地震")]])
+            we: np.ndarray = np.array([self.story("損傷限界吸収エネルギー")[self.step("稀地震")]])
             ed: np.ndarray = max(self.inputted_energy("稀地震")) * we / np.sum(we)
             kf_delta: np.ndarray = np.sqrt(
                 16 * q**2 + 7 * kf * dy * q + 2 * kf * ed
@@ -1197,7 +1214,7 @@ class Energy_Method(ss7.SS7_Reader):
         fy: np.ndarray = np.array([self.damper("降伏耐力")])
         amp: np.ndarray = np.array([np.linspace(0, 3, 100)]).T
         q: np.ndarray = fy * amp
-        we: np.ndarray = np.array([self.story("損傷限界時吸収エネルギー")[self.step("稀地震")]])
+        we: np.ndarray = np.array([self.story("損傷限界吸収エネルギー")[self.step("稀地震")]])
         ed: np.ndarray = max(self.inputted_energy("稀地震")) * we / np.sum(we)
         kf_delta: np.ndarray = np.sqrt(
             16 * q**2 + 7 * kf * dy * q + 2 * kf * ed
@@ -1318,7 +1335,7 @@ class Energy_Method(ss7.SS7_Reader):
 
         dictionary: dict[str, int | np.ndarray] = {
             "入力/Wi": story_mass,
-            "入力/損傷限界時層せん断力": self.design_shear(),
+            "入力/損傷限界層せん断力": self.design_shear(),
             "入力/hi": self.story("意匠階高"),
             "入力/pti": pti,
             "損傷用準備計算/稀地震時": self.step("稀地震") + 1,
